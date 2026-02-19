@@ -1,0 +1,159 @@
+# JPA / Hibernate — Learned Concepts
+
+---
+
+## How Hibernate Tackles the Inheritance Mismatch
+
+Object-Oriented Java supports inheritance naturally — a `Car` can extend `Vehicle`, an `Admin` can extend `User`. But relational databases have no concept of inheritance; they only know tables and rows. This is called the **Object-Relational Impedance Mismatch**.
+
+Hibernate solves this by providing **3 inheritance mapping strategies**, each a different way of flattening the OOP hierarchy into tables.
+
+---
+
+## Strategy 1 — SINGLE_TABLE (`InheritanceType.SINGLE_TABLE`)
+
+### How it works
+All classes in the hierarchy share **one single table**. A special **discriminator column** tells Hibernate which subtype each row belongs to.
+
+### Annotations
+```java
+// Parent
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "user_type", discriminatorType = DiscriminatorType.STRING)
+
+// Child
+@DiscriminatorValue("ADMIN")
+```
+
+### Tables created
+```
+users
+---------------------------------------------------------
+id | name | email | user_type | department | accessLevel | shippingAddress | loyaltyTier
+---------------------------------------------------------
+1  | Suraj | ...  | ADMIN     | Engineering| 5           | NULL            | NULL
+2  | John  | ...  | CUSTOMER  | NULL       | NULL        | Rockdale        | 1122A
+```
+
+### Pros & Cons
+| ✅ Pro | ❌ Con |
+|--------|--------|
+| Simplest, fastest queries — no joins | Subclass columns are nullable (can't enforce NOT NULL) |
+| Only one table to manage | Table gets wide with many subtypes |
+
+---
+
+## Strategy 2 — JOINED (`InheritanceType.JOINED`)
+
+### How it works
+The **parent entity has its own table** with shared fields. Each **subclass has its own table** with only its extra fields. They are linked via the **primary key as a foreign key**.
+
+### Annotations
+```java
+// Parent
+@Inheritance(strategy = InheritanceType.JOINED)
+
+// Child
+@Table(name = "cars")  // each child gets its own table
+```
+
+### Tables created
+```
+vehicles                    cars                        motorcycles
+--------------------        --------------------        ----------------------
+id | brand | year | price   id | numberOfDoors | body   id | motorcycleType | hasSidecar
+--------------------        --------------------        ----------------------
+1  | Toyota| 2022 | 35000   1  | 4             | SUV
+2  | Harley| 2021 | 20000                               2  | cruiser        | false
+```
+
+The `id` in `cars` and `motorcycles` is both the **primary key AND a foreign key** back to `vehicles`.
+
+### Query Hibernate runs under the hood
+```sql
+SELECT v.*, c.*
+FROM vehicles v
+INNER JOIN cars c ON v.id = c.id
+WHERE v.id = ?
+```
+
+### Pros & Cons
+| ✅ Pro | ❌ Con |
+|--------|--------|
+| Fully normalized, no nulls | Every query costs a JOIN |
+| Clean schema, easy to add constraints | Slightly more complex schema |
+
+---
+
+## Strategy 3 — TABLE_PER_CLASS (`InheritanceType.TABLE_PER_CLASS`)
+
+### How it works
+**No shared parent table.** Each concrete subclass gets its **own complete table** containing ALL fields — both parent and child fields duplicated. The parent class itself holds no data.
+
+### Annotations
+```java
+// Parent — must be abstract
+@Inheritance(strategy = InheritanceType.TABLE_PER_CLASS)
+
+// IMPORTANT: Must use SEQUENCE, not IDENTITY
+@GeneratedValue(strategy = GenerationType.SEQUENCE)
+```
+
+### Tables created
+```
+full_time_employees                         contract_employees
+----------------------------------------------  ----------------------------------------
+id | name  | email | baseSalary | annualLeaves | benefits  id | name | email | baseSalary | contractDuration | agency
+----------------------------------------------  ----------------------------------------
+1  | Alice | ...   | 90000      | 20           | Health    2  | Bob  | ...   | 75000      | 6 months         | TechStaff
+```
+
+Notice: `name`, `email`, `baseSalary` are **duplicated** in both tables (copied from parent).
+
+### Why SEQUENCE not IDENTITY?
+`IDENTITY` is per-table auto-increment. If both tables use it independently, you'd get `FullTimeEmployee id=1` AND `ContractEmployee id=1` — collision when Hibernate does polymorphic UNION queries. `SEQUENCE` uses a **centralized counter** (Hibernate creates a `employee_seq` table) to ensure IDs are globally unique.
+
+### The sequence table
+```sql
+SELECT * FROM employee_seq;
+-- next_val = 101
+```
+Hibernate pre-allocates IDs in **batches of 50** (default). `next_val = 101` means it has already reserved IDs 1–100 in memory. To change this:
+```java
+@SequenceGenerator(name = "emp_gen", sequenceName = "employee_seq", allocationSize = 1)
+```
+
+### Polymorphic queries use UNION
+```sql
+-- Querying the parent type fetches ALL subtypes with UNION
+SELECT * FROM full_time_employees
+UNION ALL
+SELECT * FROM contract_employees
+```
+
+### Pros & Cons
+| ✅ Pro | ❌ Con |
+|--------|--------|
+| No joins for subtype-specific queries | Parent fields duplicated across all tables |
+| Clean per-type tables | Polymorphic queries are slow (UNION) |
+
+---
+
+## Summary Comparison
+
+| | SINGLE_TABLE | JOINED | TABLE_PER_CLASS |
+|---|---|---|---|
+| **Tables created** | 1 (everything) | 1 parent + N children | N children only |
+| **Join needed?** | No | Yes (per query) | No (but UNION for polymorphic) |
+| **Discriminator column?** | Yes (required) | Optional | No |
+| **Nullable subclass columns?** | Yes | No | No |
+| **ID strategy** | IDENTITY ok | IDENTITY ok | Needs SEQUENCE |
+| **Best for** | Simple hierarchies, read-heavy | Normalized schemas, few subtypes | Isolated subtypes, rare polymorphic queries |
+
+---
+
+## Key Lombok + JPA Rules Learned
+
+- Always use `@NoArgsConstructor` on JPA entities — Hibernate needs it to instantiate objects via reflection
+- `@RequiredArgsConstructor` alone will cause `constructor already defined` errors with JPA
+- Subclasses don't need `@NoArgsConstructor` if they inherit it from the parent — but adding it explicitly is safe
